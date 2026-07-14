@@ -30,10 +30,16 @@
 #include "oled.h"
 #include "math.h"
 #include <stdio.h>
+#include "vofa_justfloat.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct Frame {
+  float fdata[3];
+  unsigned char tail[4]; // 固定帧尾
+} Frame_t;
+
 typedef struct SOGI{
     float ualfa_0;      // 输入信号 alpha 分量
     float SOGI_Ualfa;   // 输出正交 alpha
@@ -69,12 +75,14 @@ typedef struct {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define SAMPLE_SIZE   4
-#define ADC_DMA_BUFFER_LENGTH  1U
 #define PAID          3.1415926
 #define T_sample      0.00005f     //系统采样频率20kHz
 #define Gird_f        50           //系统电网频率50Hz
+#define ROOT_2        1.414f
+#define REROOT_2      0.707f
 
 #define OLED_REFRESH_MS 200U
+#define VOFA_SEND_DIVIDER 20U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -98,28 +106,24 @@ void PLL_init(PLL_t *pll);
 void Sogi_init(SOGI_t *sogi);
 void dq_pll(PLL_t *pll);
 float zl_pid_increase(float error, PID_t *pid);
+void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 float  sin_1[400] = {0};
 
-uint16_t duty1;
+uint16_t duty;
 uint16_t cnt = 0;
+uint16_t vofa_send_cnt = 0;
 float ww;
-float  m=0.75;
+float m = 0.75;
 float uq,ud;
 
-PLL_t pll_UO;
-uint16_t dma_adc_buffer[ADC_DMA_BUFFER_LENGTH] = {0};
+PLL_t UO_PLL;
+uint32_t dma_adc_buffer[2] = {0};
 volatile float UO,UO_RMS;
 
-int __io_putchar(int ch)
-{
-    uint8_t c = (uint8_t)ch;
-    HAL_UART_Transmit(&huart1, &c, 1, HAL_MAX_DELAY);
-    return ch;
-}
 /* USER CODE END 0 */
 
 /**
@@ -139,11 +143,9 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  PLL_init(&pll_UO);
-
   SinglePhase();
 
-  HAL_Delay(100);
+  PLL_init(&UO_PLL);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -160,22 +162,22 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_SPI3_Init();
-  MX_USART1_UART_Init();
-  OLED_Init();
+  MX_USART2_UART_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim1);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
 
-  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)dma_adc_buffer, ADC_DMA_BUFFER_LENGTH) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,1);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT);
+  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
 
   HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Base_Start_IT(&htim3);
 
-  printf("USART1 ready: 115200 8N1, PA9 TX, PA10 RX\r\n");
+  HAL_Delay(100);
+  OLED_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -190,10 +192,11 @@ int main(void)
     if ((HAL_GetTick() - last_oled_refresh) >= OLED_REFRESH_MS)
     {
       last_oled_refresh = HAL_GetTick();
-
       OLED_NewFrame();
-      OLED_PrintASCIIString(0, 0, "U0:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 0, UO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 0, "UO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(64, 0, UO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 16, "Wt:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(64, 16, UO_PLL.wt, 3U, &afont16x8, OLED_COLOR_NORMAL);
       OLED_ShowFrame();
     }
   }
@@ -251,19 +254,22 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if(htim == &htim2)  //判断中断是否来自于定时器
   {
-    duty1=4200+m*4200*sin_1[cnt];
-    ww=cnt*3.1416/200;
-    cnt++;
-    if(cnt==400){
-      cnt=0;
-    }
+    // duty = 4200 + 4200 * m * cos(2 * PAID * cnt++ * T_sample);
+    // if (cnt >= 20000) cnt = 0;
+    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.5f) * 30.0f;
 
-    UO = ((dma_adc_buffer[0]/4095.0f)*3.3f - 1.5f)*30.0f; // 将ADC采样值转换为实际电压值，假设ADC参考电压为3.3V，分辨率为12位，偏置为1.5V，放大倍数为30
-    PLL_update(&pll_UO, UO);
-    UO_RMS = 0.707f*sqrtf((pll_UO.sogi.SOGI_Ubeta)*(pll_UO.sogi.SOGI_Ubeta)+
-                        (pll_UO.sogi.SOGI_Ualfa)*(pll_UO.sogi.SOGI_Ualfa));
+    duty = 4200 + 4200 * m * sin_1[cnt++];
+    if (cnt >= 400) cnt = 0;
 
-    __HAL_TIM_SET_COMPARE(&htim1,TIM_CHANNEL_1,duty1);
+    PLL_update(&UO_PLL, UO);
+    UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty);
+  }
+
+  if(htim == &htim3)
+  {
+    UART_SendFrame(&huart2, UO, UO_PLL.wt, 0.0f);
   }
 }
 
@@ -275,10 +281,28 @@ void SinglePhase(void)
 	}
 }
 
+void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3)
+{
+  Frame_t frame;
+
+  frame.fdata[0] = ch1;
+  frame.fdata[1] = ch2;
+  frame.fdata[2] = ch3;
+
+  // 设置帧尾（VOFA+默认识别的帧尾）
+  frame.tail[0] = 0x00;
+  frame.tail[1] = 0x00;
+  frame.tail[2] = 0x80;
+  frame.tail[3] = 0x7F;
+
+  // 发�?�整个结构体，共 16 字节
+  HAL_UART_Transmit(huart, (uint8_t *)&frame, sizeof(Frame_t), HAL_MAX_DELAY);
+}
+
 void PLL_init(PLL_t *pll)
 {
   pll->wt = 0;
-  pll->w0 = 2*Gird_f*PAID; // 初始频率
+  pll->w0 = 2 * Gird_f * PAID; // 初始频率
   pll->pid.kp = 10;
   pll->pid.ki = 0.2;
   pll->pid.kd = 0;
@@ -290,7 +314,7 @@ void PLL_init(PLL_t *pll)
 
 void Sogi_init(SOGI_t *sogi)
 {
-	sogi->Ugird_W0=2*Gird_f*PAID;
+	sogi->Ugird_W0=2 * Gird_f * PAID;
   sogi->integral_2 = 0;
   sogi->integral_3 = 0;
   sogi->samp_t = T_sample;
