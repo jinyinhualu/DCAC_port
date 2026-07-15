@@ -30,11 +30,22 @@
 #include "oled.h"
 #include "math.h"
 #include <stdio.h>
-#include "vofa_justfloat.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct
+{
+  float kp;                       //比例系数Proportional
+  float ki;                       //积分系数Integral
+  float kd;                       //微分系数Derivative
+  float ek;                       //当前误差
+  float ek1;                      //前一次误差e(k-1)
+  float ek2;                      //再前一次误差e(k-2)
+  float location_sum;             //累计积分位置
+  float out;											//PID输出
+}PID_LocTypeDef;
+
 typedef struct Frame {
   float fdata[3];
   unsigned char tail[4]; // 固定帧尾
@@ -93,7 +104,24 @@ typedef struct {
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+float  sin_1[400] = {0};
 
+uint16_t duty;
+uint16_t cnt = 0;
+uint16_t vofa_send_cnt = 0;
+float ww;
+float m = 0.75;
+float uq,ud;
+
+uint32_t dma_adc_buffer[2] = {0};
+
+PLL_t UO_PLL;
+PID_LocTypeDef UO_PID;
+volatile float UO, UO_RMS, UO_AIM;
+
+PLL_t IO_PLL;
+PID_LocTypeDef IO_PID;
+volatile float IO, IO_RMS, IO_AIM;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -107,22 +135,12 @@ void Sogi_init(SOGI_t *sogi);
 void dq_pll(PLL_t *pll);
 float zl_pid_increase(float error, PID_t *pid);
 void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3);
+void PID_Init(PID_LocTypeDef *PID);
+float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-float  sin_1[400] = {0};
-
-uint16_t duty;
-uint16_t cnt = 0;
-uint16_t vofa_send_cnt = 0;
-float ww;
-float m = 0.75;
-float uq,ud;
-
-PLL_t UO_PLL;
-uint32_t dma_adc_buffer[2] = {0};
-volatile float UO,UO_RMS;
 
 /* USER CODE END 0 */
 
@@ -144,8 +162,12 @@ int main(void)
 
   /* USER CODE BEGIN Init */
   SinglePhase();
+  UO_AIM = 24.0f;
 
   PLL_init(&UO_PLL);
+  PID_Init(&UO_PID);
+  PLL_init(&IO_PLL);
+  PID_Init(&IO_PID);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -170,8 +192,7 @@ int main(void)
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
 
   HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,1);
-  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT);
-  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC);
+  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
 
   HAL_TIM_Base_Start_IT(&htim2);
   HAL_TIM_Base_Start_IT(&htim3);
@@ -192,6 +213,7 @@ int main(void)
     if ((HAL_GetTick() - last_oled_refresh) >= OLED_REFRESH_MS)
     {
       last_oled_refresh = HAL_GetTick();
+
       OLED_NewFrame();
       OLED_PrintASCIIString(0, 0, "UO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintFloat(64, 0, UO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
@@ -256,7 +278,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     // duty = 4200 + 4200 * m * cos(2 * PAID * cnt++ * T_sample);
     // if (cnt >= 20000) cnt = 0;
-    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.5f) * 30.0f;
+    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.562f) * 34.0f;
+    // IO = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * 3.0f;
 
     duty = 4200 + 4200 * m * sin_1[cnt++];
     if (cnt >= 400) cnt = 0;
@@ -264,12 +287,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     PLL_update(&UO_PLL, UO);
     UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
 
+    if (cnt % 200 == 0) m = PID_location(UO_AIM, UO_RMS, 0.2f, 0.9f, &UO_PID);
+
+    // PLL_update(&IO_PLL, IO);
+    // IO_RMS = REROOT_2 * sqrtf(IO_PLL.sogi.SOGI_Ualfa * IO_PLL.sogi.SOGI_Ualfa + IO_PLL.sogi.SOGI_Ubeta * IO_PLL.sogi.SOGI_Ubeta);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty);
   }
 
   if(htim == &htim3)
   {
-    UART_SendFrame(&huart2, UO, UO_PLL.wt, 0.0f);
+    UART_SendFrame(&huart2, UO, UO_PLL.wt, m);
   }
 }
 
@@ -295,7 +322,6 @@ void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3)
   frame.tail[2] = 0x80;
   frame.tail[3] = 0x7F;
 
-  // 发�?�整个结构体，共 16 字节
   HAL_UART_Transmit(huart, (uint8_t *)&frame, sizeof(Frame_t), HAL_MAX_DELAY);
 }
 
@@ -320,6 +346,18 @@ void Sogi_init(SOGI_t *sogi)
   sogi->samp_t = T_sample;
 }
 
+void PID_Init(PID_LocTypeDef *PID)
+{
+  PID->kp = 0.005f;
+  PID->ki = 0.0030f;
+  PID->kd = 0;
+  PID->ek = 0;
+	PID->ek1 = 0;
+	PID->ek2 = 0;
+  PID->location_sum = 0;
+  PID->out = 0;
+}
+
 void PLL_update(PLL_t *pll, float ualpha_input)
 {
   pll->sogi.ualfa_0 = ualpha_input;
@@ -336,6 +374,21 @@ void Sogi_fun(SOGI_t *sogi)
 
   sogi->integral_3 += sogi->Ugird_W0 * sogi->integral_2 * sogi->samp_t;
   sogi->SOGI_Ubeta = sogi->integral_3;
+}
+
+float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID)
+{
+	PID->ek =setvalue-actualvalue;
+	PID->location_sum += PID->ek;                         //计算累计误差
+	if((PID->ki!=0)&&(PID->location_sum>(PID_LIMIT_MAX/PID->ki))) PID->location_sum=PID_LIMIT_MAX/PID->ki;
+	if((PID->ki!=0)&&(PID->location_sum<(PID_LIMIT_MIN/PID->ki))) PID->location_sum=PID_LIMIT_MIN/PID->ki;//积分限幅
+
+  PID->out=PID->kp*PID->ek+(PID->ki*PID->location_sum)+PID->kd*(PID->ek-PID->ek1);
+  PID->ek1 = PID->ek;
+	if(PID->out<PID_LIMIT_MIN)	PID->out=PID_LIMIT_MIN;
+	if(PID->out>PID_LIMIT_MAX)	PID->out=PID_LIMIT_MAX;//PID->out限幅
+
+	return PID->out;
 }
 
 void dq_pll(PLL_t *pll)

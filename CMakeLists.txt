@@ -48,7 +48,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/oled.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/font.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/oled_number.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/vofa_justfloat.c
 )
 
 # Add include paths
