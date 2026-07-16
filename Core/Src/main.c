@@ -80,7 +80,23 @@ typedef struct {
     float w0;       // 当前角频�??????????????????
     PID_t pid;      // PLL的PID
     SOGI_t sogi;    // SOGI结构
-} PLL_t;
+  } PLL_t;
+
+typedef struct{
+    float kp ;
+    float kr ;
+    float wi ;
+    float reference ;
+    float ts ;
+    float L_vir;
+    float output_of_backward_integrator ;
+    float output_of_feedback ;
+    float output_of_forward_integrator ;
+    float last_input_of_forward_integrator ;
+    float error;
+    float input_of_forward_integrator;
+    float output ;
+}PR_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -106,11 +122,11 @@ typedef struct {
 /* USER CODE BEGIN PV */
 float  sin_1[400] = {0};
 
-uint16_t duty;
+uint16_t UO_Duty, IO_Duty;
 uint16_t cnt = 0;
 uint16_t vofa_send_cnt = 0;
 float ww;
-float m = 0.75;
+float m = 0.75, n;
 float uq,ud;
 
 uint32_t dma_adc_buffer[2] = {0};
@@ -119,9 +135,8 @@ PLL_t UO_PLL;
 PID_LocTypeDef UO_PID;
 volatile float UO, UO_RMS, UO_AIM;
 
-PLL_t IO_PLL;
-PID_LocTypeDef IO_PID;
-volatile float IO, IO_RMS, IO_AIM;
+PR_t IO_PR;
+volatile float IO, IO_AIM, IO_REF;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -130,13 +145,15 @@ void SystemClock_Config(void);
 void SinglePhase(void);
 void PLL_update(PLL_t *pll, float ualpha_input);
 void Sogi_fun(SOGI_t *sogi);
-void PLL_init(PLL_t *pll);
-void Sogi_init(SOGI_t *sogi);
+void PLL_Init(PLL_t *pll);
+void Sogi_Init(SOGI_t *sogi);
 void dq_pll(PLL_t *pll);
 float zl_pid_increase(float error, PID_t *pid);
 void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3);
 void PID_Init(PID_LocTypeDef *PID);
 float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
+void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts);
+void PR_calc(PR_t *s, float reference, float feedback, float wg);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -163,11 +180,11 @@ int main(void)
   /* USER CODE BEGIN Init */
   SinglePhase();
   UO_AIM = 24.0f;
+  IO_AIM = 2.0f;
 
-  PLL_init(&UO_PLL);
+  PLL_Init(&UO_PLL);
   PID_Init(&UO_PID);
-  PLL_init(&IO_PLL);
-  PID_Init(&IO_PID);
+  PR_Init(&IO_PR, 0.01, 10, 2, 0.00005);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -190,8 +207,10 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim1);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
-  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,1);
+  HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,2);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
 
   HAL_TIM_Base_Start_IT(&htim2);
@@ -274,24 +293,30 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if(htim == &htim2)  //判断中断是否来自于定时器
+  if(htim == &htim2)
   {
     // duty = 4200 + 4200 * m * cos(2 * PAID * cnt++ * T_sample);
     // if (cnt >= 20000) cnt = 0;
-    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.562f) * 34.0f;
-    // IO = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * 3.0f;
+    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
+    IO = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1000.0f / 330.0f);
 
-    duty = 4200 + 4200 * m * sin_1[cnt++];
+    UO_Duty = 4200 + 4200 * m * sin_1[cnt++];
     if (cnt >= 400) cnt = 0;
 
     PLL_update(&UO_PLL, UO);
     UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
 
     if (cnt % 200 == 0) m = PID_location(UO_AIM, UO_RMS, 0.2f, 0.9f, &UO_PID);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
-    // PLL_update(&IO_PLL, IO);
-    // IO_RMS = REROOT_2 * sqrtf(IO_PLL.sogi.SOGI_Ualfa * IO_PLL.sogi.SOGI_Ualfa + IO_PLL.sogi.SOGI_Ubeta * IO_PLL.sogi.SOGI_Ubeta);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty);
+    IO_REF = ROOT_2 * IO_AIM * sin(UO_PLL.wt);
+    PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
+    n=(IO_PR.output) / 50.0f + 0.5;
+    if (n >= 0.95) n = 0.95;
+    if (n <= 0.05) n = 0.05;
+    IO_Duty = 8400 * n;
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
   }
 
   if(htim == &htim3)
@@ -325,7 +350,7 @@ void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3)
   HAL_UART_Transmit(huart, (uint8_t *)&frame, sizeof(Frame_t), HAL_MAX_DELAY);
 }
 
-void PLL_init(PLL_t *pll)
+void PLL_Init(PLL_t *pll)
 {
   pll->wt = 0;
   pll->w0 = 2 * Gird_f * PAID; // 初始频率
@@ -335,10 +360,10 @@ void PLL_init(PLL_t *pll)
   pll->pid.uk = 0;
   pll->pid.ek = pll->pid.ek_1 = pll->pid.ek_2 = 0;
 
-  Sogi_init(&pll->sogi);
+  Sogi_Init(&pll->sogi);
 }
 
-void Sogi_init(SOGI_t *sogi)
+void Sogi_Init(SOGI_t *sogi)
 {
 	sogi->Ugird_W0=2 * Gird_f * PAID;
   sogi->integral_2 = 0;
@@ -417,6 +442,38 @@ float zl_pid_increase(float error, PID_t *pid)
   return pid->uk;
 }
 
+void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts)
+{
+    s->kp = kp_set ;
+    s->kr = kr_set ;
+    s->wi = wi_set ;
+    s->ts = ts ;
+    s->L_vir=0;
+    s->output_of_feedback = 0;
+    s->output_of_backward_integrator = 0;
+    s->output_of_forward_integrator = 0 ;
+    s->error=0;
+    s->input_of_forward_integrator=0;
+    s->reference = 0 ;
+    s->output= 0 ;
+}
+
+void PR_calc(PR_t *s, float reference, float feedback, float wg)
+{
+    s->reference = reference;
+
+    s->error = reference - feedback ;
+    s->input_of_forward_integrator = 2 * s->wi * s->kr * s->error - s->output_of_feedback;
+    // Forward integrator :
+    s->output_of_forward_integrator += s->ts *  s->input_of_forward_integrator;
+
+    // Backward integrator:
+    s->output_of_backward_integrator += s->ts * s->output_of_forward_integrator * wg * wg ;
+
+    s->output_of_feedback = s->output_of_backward_integrator + 2 * s->wi * s->output_of_forward_integrator ;
+
+    s->output=s->output_of_forward_integrator - s->kp* s->error;
+}
 /* USER CODE END 4 */
 
 /**
