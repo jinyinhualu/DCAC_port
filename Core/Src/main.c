@@ -123,7 +123,7 @@ typedef struct{
 float  sin_1[400] = {0};
 
 uint16_t UO_Duty, IO_Duty;
-uint16_t cnt = 0;
+uint16_t UO_cnt = 0, IO_cnt = 0;
 uint16_t vofa_send_cnt = 0;
 float ww;
 float m = 0.75, n;
@@ -300,28 +300,32 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
     IO = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1000.0f / 330.0f);
 
-    UO_Duty = 4200 + 4200 * m * sin_1[cnt++];
-    if (cnt >= 400) cnt = 0;
+    UO_Duty = 4200 + 4200 * m * sin_1[UO_cnt++];
+    if (UO_cnt >= 400) UO_cnt = 0;
 
     PLL_update(&UO_PLL, UO);
     UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
 
-    if (cnt % 200 == 0) m = PID_location(UO_AIM, UO_RMS, 0.2f, 0.9f, &UO_PID);
+    if (UO_cnt % 200 == 0) m = PID_location(UO_AIM, UO_RMS, 0.2f, 0.9f, &UO_PID);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
     IO_REF = ROOT_2 * IO_AIM * sin(UO_PLL.wt);
-    PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
-    n=(IO_PR.output) / 50.0f + 0.5;
-    if (n >= 0.95) n = 0.95;
-    if (n <= 0.05) n = 0.05;
-    IO_Duty = 8400 * n;
+    // PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
+    // n=(IO_PR.output) / 50.0f + 0.5;
+    // if (n >= 0.95) n = 0.95;
+    // if (n <= 0.05) n = 0.05;
+    // IO_Duty = 8400 * n;
+
+    n = 0.6f;
+    IO_Duty = 4200 + 4200 * n * sin_1[IO_cnt++];
+    if (IO_cnt >= 400) IO_cnt = 0;
 
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
   }
 
   if(htim == &htim3)
   {
-    UART_SendFrame(&huart2, UO, UO_PLL.wt, m);
+    UART_SendFrame(&huart2, UO, UO_PLL.wt, IO_REF);
   }
 }
 
