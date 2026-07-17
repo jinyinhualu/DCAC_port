@@ -29,6 +29,7 @@
 /* USER CODE BEGIN Includes */
 #include "oled.h"
 #include "math.h"
+#include <complex.h>
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -47,7 +48,7 @@ typedef struct
 }PID_LocTypeDef;
 
 typedef struct Frame {
-  float fdata[3];
+  float fdata[6];
   unsigned char tail[4]; // 固定帧尾
 } Frame_t;
 
@@ -133,10 +134,12 @@ uint32_t dma_adc_buffer[2] = {0};
 
 PLL_t UO_PLL;
 PID_LocTypeDef UO_PID;
-volatile float UO, UO_RMS, UO_AIM;
+volatile float UO, UO_RMS, UO_AIM, UO_PID_SUM, UO_PID_RMS;
 
+// PLL_t IO_PLL;
 PR_t IO_PR;
 volatile float IO, IO_AIM, IO_REF;
+// volatile float IO_RMS;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -149,7 +152,7 @@ void PLL_Init(PLL_t *pll);
 void Sogi_Init(SOGI_t *sogi);
 void dq_pll(PLL_t *pll);
 float zl_pid_increase(float error, PID_t *pid);
-void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3);
+void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3, float ch4, float ch5, float ch6);
 void PID_Init(PID_LocTypeDef *PID);
 float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
 void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts);
@@ -184,7 +187,9 @@ int main(void)
 
   PLL_Init(&UO_PLL);
   PID_Init(&UO_PID);
-  PR_Init(&IO_PR, 0.01, 10, 2, 0.00005);
+
+  // PLL_Init(&IO_PLL);
+  PR_Init(&IO_PR, 0.001, 10, 2, 0.00005);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -207,8 +212,8 @@ int main(void)
   HAL_TIM_Base_Start_IT(&htim1);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
+  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
   HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,2);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
@@ -238,6 +243,8 @@ int main(void)
       OLED_PrintFloat(64, 0, UO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintASCIIString(0, 16, "Wt:", &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintFloat(64, 16, UO_PLL.wt, 3U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 32, "IO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
+      // OLED_PrintFloat(64, 32, IO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
       OLED_ShowFrame();
     }
   }
@@ -297,35 +304,37 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     // duty = 4200 + 4200 * m * cos(2 * PAID * cnt++ * T_sample);
     // if (cnt >= 20000) cnt = 0;
-    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
-    IO = ((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1000.0f / 330.0f);
+    // UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
+    // IO = -((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1173.1f / 330.0f);
 
     UO_Duty = 4200 + 4200 * m * sin_1[UO_cnt++];
     if (UO_cnt >= 400) UO_cnt = 0;
 
-    PLL_update(&UO_PLL, UO);
-    UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
+    // PLL_update(&UO_PLL, UO);
+    // UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
 
-    if (UO_cnt % 200 == 0) m = PID_location(UO_AIM, UO_RMS, 0.2f, 0.9f, &UO_PID);
+    // UO_PID_SUM += UO_RMS;
+    // if (UO_cnt % 200 == 0) 
+    // {
+    //   UO_PID_RMS = UO_PID_SUM / 200.0f;
+    //   UO_PID_SUM = 0.0f;
+    //   m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
+    // }
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
-    IO_REF = ROOT_2 * IO_AIM * sin(UO_PLL.wt);
+    // IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
     // PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
     // n=(IO_PR.output) / 50.0f + 0.5;
     // if (n >= 0.95) n = 0.95;
     // if (n <= 0.05) n = 0.05;
     // IO_Duty = 8400 * n;
 
-    n = 0.6f;
-    IO_Duty = 4200 + 4200 * n * sin_1[IO_cnt++];
-    if (IO_cnt >= 400) IO_cnt = 0;
-
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
+    // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
   }
 
   if(htim == &htim3)
   {
-    UART_SendFrame(&huart2, UO, UO_PLL.wt, IO_REF);
+    UART_SendFrame(&huart2, UO / 10.0f, IO, IO_REF, UO_PLL.wt, n, UO_Duty / 1000.0f);
   }
 }
 
@@ -337,13 +346,16 @@ void SinglePhase(void)
 	}
 }
 
-void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3)
+void UART_SendFrame(UART_HandleTypeDef *huart, float ch1,float ch2,float ch3, float ch4, float ch5, float ch6)
 {
   Frame_t frame;
 
   frame.fdata[0] = ch1;
   frame.fdata[1] = ch2;
   frame.fdata[2] = ch3;
+  frame.fdata[3] = ch4;
+  frame.fdata[4] = ch5;
+  frame.fdata[5] = ch6;
 
   // 设置帧尾（VOFA+默认识别的帧尾）
   frame.tail[0] = 0x00;
@@ -476,7 +488,7 @@ void PR_calc(PR_t *s, float reference, float feedback, float wg)
 
     s->output_of_feedback = s->output_of_backward_integrator + 2 * s->wi * s->output_of_forward_integrator ;
 
-    s->output=s->output_of_forward_integrator - s->kp* s->error;
+    s->output=s->output_of_forward_integrator + s->kp* s->error;
 }
 /* USER CODE END 4 */
 
