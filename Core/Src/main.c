@@ -188,6 +188,9 @@ int main(void)
   PLL_Init(&UO_PLL);
   PID_Init(&UO_PID);
 
+  UO_PID.location_sum = m / UO_PID.ki;
+  UO_PID.out = m;
+
   // PLL_Init(&IO_PLL);
   PR_Init(&IO_PR, 0.001, 10, 2, 0.00005);
   /* USER CODE END Init */
@@ -414,7 +417,7 @@ float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float
 	PID->ek =setvalue-actualvalue;
 	PID->location_sum += PID->ek;                         //计算累计误差
 	if((PID->ki!=0)&&(PID->location_sum>(PID_LIMIT_MAX/PID->ki))) PID->location_sum=PID_LIMIT_MAX/PID->ki;
-	if((PID->ki!=0)&&(PID->location_sum<(PID_LIMIT_MIN/PID->ki))) PID->location_sum=PID_LIMIT_MIN/PID->ki;//积分限幅
+	if((PID->ki!=0)&&(PID->location_sum < 0)) PID->location_sum = 0;//积分限幅
 
   PID->out=PID->kp*PID->ek+(PID->ki*PID->location_sum)+PID->kd*(PID->ek-PID->ek1);
   PID->ek1 = PID->ek;
