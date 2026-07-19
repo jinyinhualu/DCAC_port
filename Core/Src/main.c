@@ -207,19 +207,15 @@ int main(void)
   MX_TIM2_Init();
   MX_SPI3_Init();
   MX_USART2_UART_Init();
-  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim1);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
-  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
   HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,2);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
-
-  HAL_TIM_Base_Start_IT(&htim2);
-  HAL_TIM_Base_Start_IT(&htim3);
 
   HAL_Delay(100);
   OLED_Init();
@@ -300,41 +296,36 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if(htim == &htim2)
+  if(htim == &htim1)
   {
     // duty = 4200 + 4200 * m * cos(2 * PAID * cnt++ * T_sample);
     // if (cnt >= 20000) cnt = 0;
-    // UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
-    // IO = -((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1173.1f / 330.0f);
+    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
+    IO = -((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1173.1f / 330.0f);
 
     UO_Duty = 4200 + 4200 * m * sin_1[UO_cnt++];
     if (UO_cnt >= 400) UO_cnt = 0;
 
-    // PLL_update(&UO_PLL, UO);
-    // UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
+    PLL_update(&UO_PLL, UO);
+    UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
 
-    // UO_PID_SUM += UO_RMS;
-    // if (UO_cnt % 200 == 0) 
-    // {
-    //   UO_PID_RMS = UO_PID_SUM / 200.0f;
-    //   UO_PID_SUM = 0.0f;
-    //   m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
-    // }
+    UO_PID_SUM += UO_RMS;
+    if (UO_cnt % 200 == 0) 
+    {
+      UO_PID_RMS = UO_PID_SUM / 200.0f;
+      UO_PID_SUM = 0.0f;
+      m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
+    }
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
-    // IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
-    // PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
-    // n=(IO_PR.output) / 50.0f + 0.5;
-    // if (n >= 0.95) n = 0.95;
-    // if (n <= 0.05) n = 0.05;
-    // IO_Duty = 8400 * n;
+    IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
+    PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
+    n=(IO_PR.output) / 50.0f + 0.5;
+    if (n >= 0.95) n = 0.95;
+    if (n <= 0.05) n = 0.05;
+    IO_Duty = 8400 * n;
 
-    // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
-  }
-
-  if(htim == &htim3)
-  {
-    UART_SendFrame(&huart2, UO / 10.0f, IO, IO_REF, UO_PLL.wt, n, UO_Duty / 1000.0f);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
   }
 }
 
