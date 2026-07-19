@@ -127,7 +127,7 @@ uint16_t UO_Duty, IO_Duty;
 uint16_t UO_cnt = 0, IO_cnt = 0;
 uint16_t vofa_send_cnt = 0;
 float ww;
-float m = 0.75, n;
+float m = 0.75f, m_transition = 0.75f, n;
 float uq,ud;
 
 uint32_t dma_adc_buffer[2] = {0};
@@ -318,8 +318,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     {
       UO_PID_RMS = UO_PID_SUM / 200.0f;
       UO_PID_SUM = 0.0f;
-      m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
+      m_transition = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
     }
+    if (UO_cnt == 100 || UO_cnt == 300) m = m_transition;
+
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
     IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
