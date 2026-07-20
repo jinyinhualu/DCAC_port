@@ -45,17 +45,37 @@ void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, KEY_H4_Pin|SCREEN_RES_Pin|SCREEN_CS_Pin|KEY_H1_Pin
+                          |KEY_H2_Pin|KEY_H3_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SCREEN_DC_GPIO_Port, SCREEN_DC_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, SCREEN_RES_Pin|SCREEN_CS_Pin, GPIO_PIN_SET);
+  /*Configure GPIO pins : KEY_V3_Pin KEY_V4_Pin KEY_V2_Pin */
+  GPIO_InitStruct.Pin = KEY_V3_Pin|KEY_V4_Pin|KEY_V2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : KEY_H4_Pin KEY_H1_Pin KEY_H2_Pin KEY_H3_Pin */
+  GPIO_InitStruct.Pin = KEY_H4_Pin|KEY_H1_Pin|KEY_H2_Pin|KEY_H3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : KEY_V1_Pin */
+  GPIO_InitStruct.Pin = KEY_V1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(KEY_V1_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : SCREEN_DC_Pin */
   GPIO_InitStruct.Pin = SCREEN_DC_Pin;

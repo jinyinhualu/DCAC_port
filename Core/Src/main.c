@@ -111,6 +111,10 @@ typedef struct{
 
 #define OLED_REFRESH_MS 200U
 #define VOFA_SEND_DIVIDER 20U
+#define START_KEY_DEBOUNCE_MS 30U
+#define PWM_PERIOD_COUNTS 8400U
+#define PWM_HALF_PERIOD_COUNTS 4200U
+#define PWM_OUTPUT_PINS (GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -140,6 +144,7 @@ volatile float UO, UO_RMS, UO_AIM, UO_PID_SUM, UO_PID_RMS;
 PR_t IO_PR;
 volatile float IO, IO_AIM, IO_REF;
 // volatile float IO_RMS;
+static volatile uint8_t app_spwm_started = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -157,6 +162,13 @@ void PID_Init(PID_LocTypeDef *PID);
 float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float PID_LIMIT_MAX, PID_LocTypeDef *PID);
 void PR_Init(PR_t *s, float kp_set, float kr_set, float wi_set, float ts);
 void PR_calc(PR_t *s, float reference, float feedback, float wg);
+static void App_StartSpwm(void);
+static void App_StopSpwm(void);
+static void App_DrawMenu(void);
+static void App_DrawRunStatus(void);
+static void App_PwmOutputsToTimerAf(void);
+static void App_PwmOutputsToGpioLow(void);
+static uint8_t Keypad1Pressed(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -209,20 +221,16 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start_IT(&htim1);
-  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-  // HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
-  // HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
+  App_StopSpwm();
 
   HAL_ADC_Start_DMA(&hadc1,dma_adc_buffer,2);
   __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
 
-  HAL_TIM_Base_Start_IT(&htim2);
-  HAL_TIM_Base_Start_IT(&htim3);
-
   HAL_Delay(100);
   OLED_Init();
+  App_DrawMenu();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -234,18 +242,33 @@ int main(void)
     /* USER CODE BEGIN 3 */
     static uint32_t last_oled_refresh = 0U;
 
+    if (Keypad1Pressed() != 0U)
+    {
+      if (app_spwm_started == 0U)
+      {
+        App_StartSpwm();
+        App_DrawRunStatus();
+      }
+      else
+      {
+        App_StopSpwm();
+        App_DrawMenu();
+      }
+      last_oled_refresh = HAL_GetTick();
+    }
+
     if ((HAL_GetTick() - last_oled_refresh) >= OLED_REFRESH_MS)
     {
       last_oled_refresh = HAL_GetTick();
 
-      OLED_NewFrame();
-      OLED_PrintASCIIString(0, 0, "UO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(64, 0, UO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintASCIIString(0, 16, "Wt:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(64, 16, UO_PLL.wt, 3U, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintASCIIString(0, 32, "IO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
-      // OLED_PrintFloat(64, 32, IO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_ShowFrame();
+      if (app_spwm_started == 0U)
+      {
+        App_DrawMenu();
+      }
+      else
+      {
+        App_DrawRunStatus();
+      }
     }
   }
   /* USER CODE END 3 */
@@ -298,43 +321,168 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void App_StartSpwm(void)
+{
+  App_PwmOutputsToTimerAf();
+
+  UO_cnt = 0U;
+  IO_cnt = 0U;
+  vofa_send_cnt = 0U;
+  UO_PID_SUM = 0.0f;
+  UO_PID_RMS = 0.0f;
+  UO = 0.0f;
+  IO = 0.0f;
+  IO_REF = 0.0f;
+  m = 0.75f;
+  n = 0.5f;
+  UO_Duty = PWM_HALF_PERIOD_COUNTS;
+  IO_Duty = PWM_HALF_PERIOD_COUNTS;
+
+  PLL_Init(&UO_PLL);
+  PID_Init(&UO_PID);
+  PR_Init(&IO_PR, 0.001f, 10.0f, 2.0f, T_sample);
+
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
+
+  app_spwm_started = 1U;
+
+  HAL_TIM_Base_Start_IT(&htim1);
+  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Base_Start_IT(&htim3);
+}
+
+static void App_StopSpwm(void)
+{
+  app_spwm_started = 0U;
+
+  HAL_TIM_Base_Stop_IT(&htim2);
+  HAL_TIM_Base_Stop_IT(&htim3);
+
+  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
+  HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_Base_Stop_IT(&htim1);
+
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
+  __HAL_TIM_SET_COUNTER(&htim1, 0U);
+  __HAL_TIM_SET_COUNTER(&htim2, 0U);
+  __HAL_TIM_SET_COUNTER(&htim3, 0U);
+
+  UO_Duty = 0U;
+  IO_Duty = 0U;
+  UO_cnt = 0U;
+  IO_cnt = 0U;
+  vofa_send_cnt = 0U;
+  UO_PID_SUM = 0.0f;
+  UO_PID_RMS = 0.0f;
+  IO_REF = 0.0f;
+  n = 0.0f;
+
+  App_PwmOutputsToGpioLow();
+}
+
+static void App_DrawMenu(void)
+{
+  OLED_NewFrame();
+  OLED_PrintASCIIString(24, 0, "MENU", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 16, "SPWM: OFF", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 32, "PRESS KEY", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 48, "TO START", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_ShowFrame();
+}
+
+static void App_DrawRunStatus(void)
+{
+  OLED_NewFrame();
+  OLED_PrintASCIIString(0, 0, "UO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintFloat(64, 0, UO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 16, "Wt:", &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintFloat(64, 16, UO_PLL.wt, 3U, &afont16x8, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(0, 32, "IO_RMS:", &afont16x8, OLED_COLOR_NORMAL);
+  // OLED_PrintFloat(64, 32, IO_RMS, 3U, &afont16x8, OLED_COLOR_NORMAL);
+  OLED_ShowFrame();
+}
+
+static void App_PwmOutputsToTimerAf(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  GPIO_InitStruct.Pin = PWM_OUTPUT_PINS;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+}
+
+static void App_PwmOutputsToGpioLow(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOE, PWM_OUTPUT_PINS, GPIO_PIN_RESET);
+
+  GPIO_InitStruct.Pin = PWM_OUTPUT_PINS;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOE, PWM_OUTPUT_PINS, GPIO_PIN_RESET);
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if(htim == &htim2)
   {
+    if (app_spwm_started == 0U)
+    {
+      return;
+    }
+
     // duty = 4200 + 4200 * m * cos(2 * PAID * cnt++ * T_sample);
     // if (cnt >= 20000) cnt = 0;
-    // UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
-    // IO = -((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1173.1f / 330.0f);
+    UO = ((float)(dma_adc_buffer[0] / 4096.0f) * 3.3f - 1.56f) * 33.8f;
+    IO = -((float)(dma_adc_buffer[1] / 4096.0f) * 3.3f - 1.5f) * (1173.1f / 330.0f);
 
-    UO_Duty = 4200 + 4200 * m * sin_1[UO_cnt++];
+    UO_Duty = PWM_HALF_PERIOD_COUNTS + PWM_HALF_PERIOD_COUNTS * m * sin_1[UO_cnt++];
     if (UO_cnt >= 400) UO_cnt = 0;
 
-    // PLL_update(&UO_PLL, UO);
-    // UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
+    PLL_update(&UO_PLL, UO);
+    UO_RMS = REROOT_2 * sqrtf(UO_PLL.sogi.SOGI_Ualfa * UO_PLL.sogi.SOGI_Ualfa + UO_PLL.sogi.SOGI_Ubeta * UO_PLL.sogi.SOGI_Ubeta);
 
-    // UO_PID_SUM += UO_RMS;
-    // if (UO_cnt % 200 == 0) 
-    // {
-    //   UO_PID_RMS = UO_PID_SUM / 200.0f;
-    //   UO_PID_SUM = 0.0f;
-    //   m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
-    // }
+    UO_PID_SUM += UO_RMS;
+    if (UO_cnt % 200 == 0) 
+    {
+      UO_PID_RMS = UO_PID_SUM / 200.0f;
+      UO_PID_SUM = 0.0f;
+      m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
+    }
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
-    // IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
-    // PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
-    // n=(IO_PR.output) / 50.0f + 0.5;
-    // if (n >= 0.95) n = 0.95;
-    // if (n <= 0.05) n = 0.05;
-    // IO_Duty = 8400 * n;
+    IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
+    PR_calc(&IO_PR, IO_REF, IO, UO_PLL.w0);
+    n=(IO_PR.output) / 50.0f + 0.5;
+    if (n >= 0.95) n = 0.95;
+    if (n <= 0.05) n = 0.05;
+    IO_Duty = PWM_PERIOD_COUNTS * n;
 
-    // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
   }
 
   if(htim == &htim3)
   {
-    UART_SendFrame(&huart2, UO / 10.0f, IO, IO_REF, UO_PLL.wt, n, UO_Duty / 1000.0f);
+    if (app_spwm_started != 0U)
+    {
+      UART_SendFrame(&huart2, UO / 10.0f, IO, IO_REF, UO_PLL.wt, n, UO_Duty / 1000.0f);
+    }
   }
 }
 
@@ -490,6 +638,84 @@ void PR_calc(PR_t *s, float reference, float feedback, float wg)
 
     s->output=s->output_of_forward_integrator + s->kp* s->error;
 }
+
+static uint8_t Keypad1Pressed(void)
+{
+  static uint8_t key_down = 0U;
+  static uint32_t press_start_tick = 0U;
+  uint8_t pressed = 0U;
+  uint32_t now = HAL_GetTick();
+
+  HAL_GPIO_WritePin(GPIOD, KEY_H1_Pin|KEY_H2_Pin|KEY_H3_Pin|KEY_H4_Pin, GPIO_PIN_SET);
+
+  HAL_GPIO_WritePin(KEY_H1_GPIO_Port, KEY_H1_Pin, GPIO_PIN_RESET);
+  for (volatile uint32_t i = 0U; i < 100U; ++i) { __NOP(); }
+  pressed = (HAL_GPIO_ReadPin(KEY_V1_GPIO_Port, KEY_V1_Pin) == GPIO_PIN_RESET) ||
+            (HAL_GPIO_ReadPin(KEY_V2_GPIO_Port, KEY_V2_Pin) == GPIO_PIN_RESET) ||
+            (HAL_GPIO_ReadPin(KEY_V3_GPIO_Port, KEY_V3_Pin) == GPIO_PIN_RESET) ||
+            (HAL_GPIO_ReadPin(KEY_V4_GPIO_Port, KEY_V4_Pin) == GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(KEY_H1_GPIO_Port, KEY_H1_Pin, GPIO_PIN_SET);
+
+  if (pressed == 0U)
+  {
+    HAL_GPIO_WritePin(KEY_H2_GPIO_Port, KEY_H2_Pin, GPIO_PIN_RESET);
+    for (volatile uint32_t i = 0U; i < 100U; ++i) { __NOP(); }
+    pressed = (HAL_GPIO_ReadPin(KEY_V1_GPIO_Port, KEY_V1_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V2_GPIO_Port, KEY_V2_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V3_GPIO_Port, KEY_V3_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V4_GPIO_Port, KEY_V4_Pin) == GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(KEY_H2_GPIO_Port, KEY_H2_Pin, GPIO_PIN_SET);
+  }
+
+  if (pressed == 0U)
+  {
+    HAL_GPIO_WritePin(KEY_H3_GPIO_Port, KEY_H3_Pin, GPIO_PIN_RESET);
+    for (volatile uint32_t i = 0U; i < 100U; ++i) { __NOP(); }
+    pressed = (HAL_GPIO_ReadPin(KEY_V1_GPIO_Port, KEY_V1_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V2_GPIO_Port, KEY_V2_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V3_GPIO_Port, KEY_V3_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V4_GPIO_Port, KEY_V4_Pin) == GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(KEY_H3_GPIO_Port, KEY_H3_Pin, GPIO_PIN_SET);
+  }
+
+  if (pressed == 0U)
+  {
+    HAL_GPIO_WritePin(KEY_H4_GPIO_Port, KEY_H4_Pin, GPIO_PIN_RESET);
+    for (volatile uint32_t i = 0U; i < 100U; ++i) { __NOP(); }
+    pressed = (HAL_GPIO_ReadPin(KEY_V1_GPIO_Port, KEY_V1_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V2_GPIO_Port, KEY_V2_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V3_GPIO_Port, KEY_V3_Pin) == GPIO_PIN_RESET) ||
+              (HAL_GPIO_ReadPin(KEY_V4_GPIO_Port, KEY_V4_Pin) == GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(KEY_H4_GPIO_Port, KEY_H4_Pin, GPIO_PIN_SET);
+  }
+
+  if (pressed == 0U)
+  {
+    key_down = 0U;
+    press_start_tick = 0U;
+    return 0U;
+  }
+
+  if (key_down != 0U)
+  {
+    return 0U;
+  }
+
+  if (press_start_tick == 0U)
+  {
+    press_start_tick = HAL_GetTick();
+    return 0U;
+  }
+
+  if ((now - press_start_tick) < START_KEY_DEBOUNCE_MS)
+  {
+    return 0U;
+  }
+
+  key_down = 1U;
+  return 1U;
+}
+
 /* USER CODE END 4 */
 
 /**
