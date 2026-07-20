@@ -131,7 +131,7 @@ uint16_t UO_Duty, IO_Duty;
 uint16_t UO_cnt = 0, IO_cnt = 0;
 uint16_t vofa_send_cnt = 0;
 float ww;
-float m = 0.75, n;
+float m = 0.75f, m_transition = 0.75f, n;
 float uq,ud;
 
 uint32_t dma_adc_buffer[2] = {0};
@@ -200,6 +200,9 @@ int main(void)
   PLL_Init(&UO_PLL);
   PID_Init(&UO_PID);
 
+  UO_PID.location_sum = m / UO_PID.ki;
+  UO_PID.out = m;
+
   // PLL_Init(&IO_PLL);
   PR_Init(&IO_PR, 0.001, 10, 2, 0.00005);
   /* USER CODE END Init */
@@ -216,10 +219,8 @@ int main(void)
   MX_DMA_Init();
   MX_ADC1_Init();
   MX_TIM1_Init();
-  MX_TIM2_Init();
   MX_SPI3_Init();
   MX_USART2_UART_Init();
-  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
@@ -334,12 +335,15 @@ static void App_StartSpwm(void)
   IO = 0.0f;
   IO_REF = 0.0f;
   m = 0.75f;
+  m_transition = m;
   n = 0.5f;
   UO_Duty = PWM_HALF_PERIOD_COUNTS;
   IO_Duty = PWM_HALF_PERIOD_COUNTS;
 
   PLL_Init(&UO_PLL);
   PID_Init(&UO_PID);
+  UO_PID.location_sum = m / UO_PID.ki;
+  UO_PID.out = m;
   PR_Init(&IO_PR, 0.001f, 10.0f, 2.0f, T_sample);
 
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
@@ -352,17 +356,14 @@ static void App_StartSpwm(void)
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
-  HAL_TIM_Base_Start_IT(&htim2);
-  HAL_TIM_Base_Start_IT(&htim3);
+  HAL_TIM_OC_Start(&htim1, TIM_CHANNEL_3);
 }
 
 static void App_StopSpwm(void)
 {
   app_spwm_started = 0U;
 
-  HAL_TIM_Base_Stop_IT(&htim2);
-  HAL_TIM_Base_Stop_IT(&htim3);
-
+  HAL_TIM_OC_Stop(&htim1, TIM_CHANNEL_3);
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
@@ -372,8 +373,6 @@ static void App_StopSpwm(void)
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
   __HAL_TIM_SET_COUNTER(&htim1, 0U);
-  __HAL_TIM_SET_COUNTER(&htim2, 0U);
-  __HAL_TIM_SET_COUNTER(&htim3, 0U);
 
   UO_Duty = 0U;
   IO_Duty = 0U;
@@ -440,7 +439,7 @@ static void App_PwmOutputsToGpioLow(void)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if(htim == &htim2)
+  if(htim == &htim1)
   {
     if (app_spwm_started == 0U)
     {
@@ -463,8 +462,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     {
       UO_PID_RMS = UO_PID_SUM / 200.0f;
       UO_PID_SUM = 0.0f;
-      m = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
+      m_transition = PID_location(UO_AIM, UO_PID_RMS, 0.2f, 0.9f, &UO_PID);
     }
+    if (UO_cnt == 100 || UO_cnt == 300) m = m_transition;
+
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, UO_Duty);
 
     IO_REF = ROOT_2 * IO_AIM * cos(UO_PLL.wt - 0.375f);
@@ -475,14 +476,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     IO_Duty = PWM_PERIOD_COUNTS * n;
 
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, IO_Duty);
-  }
-
-  if(htim == &htim3)
-  {
-    if (app_spwm_started != 0U)
-    {
-      UART_SendFrame(&huart2, UO / 10.0f, IO, IO_REF, UO_PLL.wt, n, UO_Duty / 1000.0f);
-    }
   }
 }
 
@@ -570,7 +563,7 @@ float PID_location(float setvalue, float actualvalue, float PID_LIMIT_MIN, float
 	PID->ek =setvalue-actualvalue;
 	PID->location_sum += PID->ek;                         //计算累计误差
 	if((PID->ki!=0)&&(PID->location_sum>(PID_LIMIT_MAX/PID->ki))) PID->location_sum=PID_LIMIT_MAX/PID->ki;
-	if((PID->ki!=0)&&(PID->location_sum<(PID_LIMIT_MIN/PID->ki))) PID->location_sum=PID_LIMIT_MIN/PID->ki;//积分限幅
+	if((PID->ki!=0)&&(PID->location_sum < 0)) PID->location_sum = 0;//积分限幅
 
   PID->out=PID->kp*PID->ek+(PID->ki*PID->location_sum)+PID->kd*(PID->ek-PID->ek1);
   PID->ek1 = PID->ek;
